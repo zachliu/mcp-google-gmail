@@ -324,8 +324,8 @@ uv run mcp-google-gmail --transport sse
 This setup is **required** before running the server.
 
 1.  **Create/Select a GCP Project** — Go to the [Google Cloud Console](https://console.cloud.google.com/)
-2.  **Enable the Gmail API** — Navigate to "APIs & Services" → "Library", search for "Gmail API", click Enable
-3.  **Configure OAuth Consent Screen** — Go to "APIs & Services" → "OAuth consent screen", select External, fill in app name and contact email, add the scope `https://www.googleapis.com/auth/gmail.modify`
+2.  **Enable the Gmail and Drive APIs** — Navigate to "APIs & Services" → "Library", search for "Gmail API" and "Google Drive API", click Enable on each
+3.  **Configure OAuth Consent Screen** — Go to "APIs & Services" → "OAuth consent screen", select External, fill in app name and contact email, add the scopes `https://www.googleapis.com/auth/gmail.modify` and `https://www.googleapis.com/auth/drive.readonly` (the latter is used by `drive_get_doc`)
 4.  **Create OAuth Credentials** — Go to "APIs & Services" → "Credentials" → "Create Credentials" → "OAuth 2.0 Client ID", select **Desktop application**
 5.  **Download Credentials** — Click the download button and save as `credentials.json`
 6.  **Authenticate** — Run the auth command:

@@ -44,7 +44,10 @@ from mcp.server.fastmcp import Context, FastMCP
 # Configuration
 # ---------------------------------------------------------------------------
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
 
 CREDENTIALS_CONFIG = os.environ.get("GMAIL_CREDENTIALS_CONFIG")
 SERVICE_ACCOUNT_PATH = os.environ.get(
@@ -63,13 +66,14 @@ _resolved_port = int(os.environ.get("PORT", os.environ.get("FASTMCP_PORT", "8000
 
 @dataclass
 class GmailContext:
-    """Context holding the authenticated Gmail service."""
+    """Context holding the authenticated Gmail and Drive services."""
 
     service: Any
+    drive: Any
 
 
 def _authenticate() -> Any:
-    """Build an authenticated Gmail API service using the credential chain."""
+    """Return Google credentials using the credential chain."""
     creds = None
 
     # 1. Base64-encoded service account from env var
@@ -85,9 +89,11 @@ def _authenticate() -> Any:
             SERVICE_ACCOUNT_PATH, scopes=SCOPES
         )
 
-    # 3. Existing OAuth token
+    # 3. Existing OAuth token (skipped if it lacks a scope, forcing re-consent)
     if not creds and Path(TOKEN_PATH).exists():
-        creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
+        token_scopes = json.loads(Path(TOKEN_PATH).read_text()).get("scopes", [])
+        if set(SCOPES) <= set(token_scopes):
+            creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
 
     # 4. Refresh or interactive OAuth flow
     if not creds or not creds.valid:
@@ -116,15 +122,18 @@ def _authenticate() -> Any:
             "GMAIL_TOKEN_PATH, or GMAIL_CREDENTIALS_PATH."
         )
 
-    return build("gmail", "v1", credentials=creds)
+    return creds
 
 
 @asynccontextmanager
 async def gmail_lifespan(server: FastMCP) -> AsyncIterator[GmailContext]:
-    """Create the Gmail service once at startup."""
-    service = _authenticate()
+    """Create the Gmail and Drive services once at startup."""
+    creds = _authenticate()
     try:
-        yield GmailContext(service=service)
+        yield GmailContext(
+            service=build("gmail", "v1", credentials=creds),
+            drive=build("drive", "v3", credentials=creds),
+        )
     finally:
         pass
 
@@ -1186,6 +1195,43 @@ def gmail_untrash_message(ctx: Context, message_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tools: Google Docs (via Drive)
+# ---------------------------------------------------------------------------
+
+_DOC_EXPORT_TYPES = {"markdown": "text/markdown", "text": "text/plain"}
+
+
+@mcp.tool()
+def drive_get_doc(ctx: Context, doc: str, format: str = "markdown") -> dict:
+    """Read a Google Doc as markdown or plain text, e.g. Gemini meeting notes.
+
+    Args:
+        ctx: MCP context (injected automatically).
+        doc: Doc ID or URL (e.g. https://docs.google.com/document/d/<id>/edit).
+        format: "markdown" (default) or "text".
+    """
+    try:
+        match = re.search(r"/d/([A-Za-z0-9_-]+)", doc)
+        file_id = match.group(1) if match else doc
+        mime_type = _DOC_EXPORT_TYPES.get(format)
+        if mime_type is None:
+            return {"error": f"format must be one of {list(_DOC_EXPORT_TYPES)}"}
+        drive = ctx.request_context.lifespan_context.drive
+        meta = drive.files().get(fileId=file_id, fields="name,modifiedTime").execute()
+        content = drive.files().export(fileId=file_id, mimeType=mime_type).execute()
+        return {
+            "id": file_id,
+            "name": meta["name"],
+            "modified_time": meta["modifiedTime"],
+            "content": content.decode("utf-8", errors="replace"),
+        }
+    except HttpError as e:
+        return {"error": str(e), "status_code": e.resp.status}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -1197,7 +1243,7 @@ def auth():
     print()
 
     try:
-        service = _authenticate()
+        service = build("gmail", "v1", credentials=_authenticate())
         profile = service.users().getProfile(userId="me").execute()
         print(f"Authenticated as: {profile['emailAddress']}")
         print(f"Total messages:   {profile['messagesTotal']}")
