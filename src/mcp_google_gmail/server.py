@@ -19,6 +19,7 @@ import mimetypes
 import os
 import re
 import sys
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from typing import Any
 
 import google.auth
 import google.auth.transport.requests
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
@@ -104,9 +106,13 @@ def _authenticate() -> Any:
             and hasattr(creds, "refresh_token")
             and creds.refresh_token
         ):
-            creds.refresh(Request())
-            Path(TOKEN_PATH).write_text(creds.to_json())
-        elif Path(CREDENTIALS_PATH).exists():
+            try:
+                creds.refresh(Request())
+                Path(TOKEN_PATH).write_text(creds.to_json())
+            except RefreshError:
+                # Expired or revoked refresh token: fall through to a new login
+                creds = None
+        if (not creds or not creds.valid) and Path(CREDENTIALS_PATH).exists():
             flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
             creds = flow.run_local_server(port=0)
             Path(TOKEN_PATH).write_text(creds.to_json())
@@ -144,6 +150,11 @@ async def gmail_lifespan(server: FastMCP) -> AsyncIterator[GmailContext]:
 
 mcp = FastMCP(
     "Gmail",
+    instructions=(
+        "Reads and sends Gmail, and reads Google Drive (read-only). Use "
+        "drive_search_files to find a Google Doc or folder by name, e.g. "
+        "Gemini meeting notes, and drive_get_doc to read a Doc by link or ID."
+    ),
     dependencies=[
         "google-auth",
         "google-auth-oauthlib",
@@ -158,6 +169,21 @@ mcp = FastMCP(
 def _get_service(ctx: Context) -> Any:
     """Extract the Gmail service from the lifespan context."""
     return ctx.request_context.lifespan_context.service
+
+
+def _error(e: Exception) -> dict:
+    """Turn an unexpected exception into a tool error result."""
+    if isinstance(e, RefreshError):
+        return {
+            "error": (
+                "Google login expired or was revoked. Reconnecting the MCP "
+                "server will not fix this. Ask the user to log in again by "
+                f"running `mcp-google-gmail auth` with GMAIL_CREDENTIALS_PATH="
+                f"{CREDENTIALS_PATH} and GMAIL_TOKEN_PATH={TOKEN_PATH}, then "
+                "reconnect the server."
+            )
+        }
+    return {"error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +497,7 @@ def gmail_list_messages(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -505,7 +531,7 @@ def gmail_get_message(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -590,7 +616,7 @@ def gmail_get_thread(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -654,7 +680,7 @@ def gmail_search_messages(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -710,7 +736,7 @@ def gmail_list_drafts(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -762,7 +788,7 @@ def gmail_send_message(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -894,7 +920,7 @@ def gmail_reply_on_message(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -947,7 +973,7 @@ def gmail_create_draft(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1007,7 +1033,7 @@ def gmail_update_draft(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1025,7 +1051,7 @@ def gmail_delete_draft(ctx: Context, draft_id: str) -> dict:
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1045,7 +1071,7 @@ def gmail_send_draft(ctx: Context, draft_id: str) -> dict:
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1066,7 +1092,7 @@ def gmail_list_labels(ctx: Context) -> dict:
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1096,7 +1122,7 @@ def gmail_create_label(ctx: Context, name: str) -> dict:
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1114,7 +1140,7 @@ def gmail_delete_label(ctx: Context, label_id: str) -> dict:
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1153,7 +1179,7 @@ def gmail_modify_message_labels(
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1171,7 +1197,7 @@ def gmail_trash_message(ctx: Context, message_id: str) -> dict:
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 @mcp.tool()
@@ -1191,7 +1217,7 @@ def gmail_untrash_message(ctx: Context, message_id: str) -> dict:
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 # ---------------------------------------------------------------------------
@@ -1199,11 +1225,101 @@ def gmail_untrash_message(ctx: Context, message_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 _DOC_EXPORT_TYPES = {"markdown": "text/markdown", "text": "text/plain"}
+_GOOGLE_DOC = "application/vnd.google-apps.document"
+_GOOGLE_FOLDER = "application/vnd.google-apps.folder"
+_DATA_URI_IMAGE = re.compile(r"data:(image/[\w.+-]+);base64,([A-Za-z0-9+/=]+)")
+
+
+def _save_doc_images(content: str, file_id: str) -> tuple[str, list[str]]:
+    """Write embedded base64 images to disk and swap them for file paths."""
+    image_dir = Path(tempfile.gettempdir()) / f"gdoc-{file_id}"
+    paths: list[str] = []
+
+    def _save(match: re.Match) -> str:
+        image_dir.mkdir(exist_ok=True)
+        ext = mimetypes.guess_extension(match.group(1)) or ".bin"
+        path = image_dir / f"image{len(paths) + 1}{ext}"
+        path.write_bytes(base64.b64decode(match.group(2)))
+        paths.append(str(path))
+        return str(path)
+
+    return _DATA_URI_IMAGE.sub(_save, content), paths
+
+
+def _drive_file_id(link_or_id: str) -> str:
+    """Pull the file ID out of a Docs/Drive URL, or return the input as is."""
+    match = re.search(r"/(?:d|folders)/([A-Za-z0-9_-]+)", link_or_id) or re.search(
+        r"[?&]id=([A-Za-z0-9_-]+)", link_or_id
+    )
+    return match.group(1) if match else link_or_id
+
+
+@mcp.tool()
+def drive_search_files(
+    ctx: Context,
+    name: str | None = None,
+    folder: str | None = None,
+    max_results: int = 20,
+) -> dict:
+    """Find Google Drive files by name and/or folder, newest first.
+
+    Covers My Drive, files shared with you, and shared drives. Pass a result's
+    id to drive_get_doc to read a Google Doc.
+
+    Args:
+        ctx: MCP context (injected automatically).
+        name: Words the file name contains, e.g. "Weekly Sync 2026/01/15".
+        folder: Folder ID or URL to list (only its direct children).
+        max_results: Maximum files to return (1-100, default 20).
+    """
+    try:
+        if not name and not folder:
+            return {"error": "Pass name, folder, or both."}
+        clauses = ["trashed = false"]
+        if name:
+            escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+            clauses.append(f"name contains '{escaped}'")
+        if folder:
+            clauses.append(f"'{_drive_file_id(folder)}' in parents")
+        drive = ctx.request_context.lifespan_context.drive
+        result = (
+            drive.files()
+            .list(
+                q=" and ".join(clauses),
+                orderBy="modifiedTime desc",
+                pageSize=max(1, min(max_results, 100)),
+                fields="files(id,name,mimeType,modifiedTime,webViewLink,owners(displayName))",
+                corpora="allDrives",
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        return {
+            "files": [
+                {
+                    "id": f["id"],
+                    "name": f["name"],
+                    "mime_type": f["mimeType"],
+                    "modified_time": f["modifiedTime"],
+                    "link": f.get("webViewLink"),
+                    "owners": [o["displayName"] for o in f.get("owners", [])],
+                }
+                for f in result.get("files", [])
+            ]
+        }
+    except HttpError as e:
+        return {"error": str(e), "status_code": e.resp.status}
+    except Exception as e:
+        return _error(e)
 
 
 @mcp.tool()
 def drive_get_doc(ctx: Context, doc: str, format: str = "markdown") -> dict:
     """Read a Google Doc as markdown or plain text, e.g. Gemini meeting notes.
+
+    Embedded images are saved to a temp folder and replaced with their file
+    paths, so they can be opened separately only when needed.
 
     Args:
         ctx: MCP context (injected automatically).
@@ -1211,24 +1327,44 @@ def drive_get_doc(ctx: Context, doc: str, format: str = "markdown") -> dict:
         format: "markdown" (default) or "text".
     """
     try:
-        match = re.search(r"/d/([A-Za-z0-9_-]+)", doc)
-        file_id = match.group(1) if match else doc
+        file_id = _drive_file_id(doc)
         mime_type = _DOC_EXPORT_TYPES.get(format)
         if mime_type is None:
             return {"error": f"format must be one of {list(_DOC_EXPORT_TYPES)}"}
         drive = ctx.request_context.lifespan_context.drive
-        meta = drive.files().get(fileId=file_id, fields="name,modifiedTime").execute()
+        meta = (
+            drive.files()
+            .get(
+                fileId=file_id,
+                fields="name,mimeType,modifiedTime",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        if meta["mimeType"] != _GOOGLE_DOC:
+            hint = (
+                " Use drive_search_files(folder=...) to list it."
+                if meta["mimeType"] == _GOOGLE_FOLDER
+                else ""
+            )
+            return {
+                "error": f"{meta['name']} is {meta['mimeType']}, not a Google Doc.{hint}"
+            }
         content = drive.files().export(fileId=file_id, mimeType=mime_type).execute()
+        text, images = _save_doc_images(
+            content.decode("utf-8", errors="replace"), file_id
+        )
         return {
             "id": file_id,
             "name": meta["name"],
             "modified_time": meta["modifiedTime"],
-            "content": content.decode("utf-8", errors="replace"),
+            "content": text,
+            "images": images,
         }
     except HttpError as e:
         return {"error": str(e), "status_code": e.resp.status}
     except Exception as e:
-        return {"error": str(e)}
+        return _error(e)
 
 
 # ---------------------------------------------------------------------------
